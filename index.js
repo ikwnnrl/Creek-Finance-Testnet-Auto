@@ -1,8 +1,8 @@
-import { Ed25519Keypair } from '@mysten/sui.js/keypairs/ed25519';
-import { TransactionBlock } from '@mysten/sui.js/transactions';
-import { SuiClient } from '@mysten/sui.js/client';
-import { decodeSuiPrivateKey } from '@mysten/sui.js/cryptography';
-import fs from 'fs';
+const { Ed25519Keypair } = require('@mysten/sui.js/keypairs/ed25519');
+const { TransactionBlock } = require('@mysten/sui.js/transactions');
+const { SuiClient } = require('@mysten/sui.js/client');
+const { decodeSuiPrivateKey } = require('@mysten/sui.js/cryptography');
+const fs = require('fs');
 
 // ============================================
 // CONFIG
@@ -10,6 +10,7 @@ import fs from 'fs';
 const CONFIG = {
     RPC_URL: 'https://sui-testnet-rpc.publicnode.com',
     PRIVATE_KEYS_FILE: 'privatekey.txt',
+    PROXY_FILE: 'proxy.txt',
     SUI_FAUCET_URL: 'https://faucet.testnet.sui.io/v2/gas',
     SUI_FAUCET_RETRIES: 50,
     MIN_SUI_BALANCE: 1,
@@ -60,6 +61,45 @@ const HEALTH_FACTOR_CONFIG = {
 };
 
 const suiClient = new SuiClient({ url: CONFIG.RPC_URL });
+
+// ============================================
+// PROXY MANAGEMENT
+// ============================================
+function readProxyMappings(filename = CONFIG.PROXY_FILE) {
+    try {
+        if (!fs.existsSync(filename)) {
+            console.log(`⚠️ File ${filename} tidak ditemukan - semua wallet gunakan Local IP\n`);
+            return {};
+        }
+        const proxies = {};
+        const lines = fs.readFileSync(filename, 'utf8').split('\n');
+        lines.forEach((line, index) => {
+            const trimmed = line.trim();
+            if (trimmed && !trimmed.startsWith('#')) {
+                proxies[`pk${index + 1}`] = trimmed;
+            } else {
+                proxies[`pk${index + 1}`] = null;
+            }
+        });
+        return proxies;
+    } catch (error) {
+        console.error(`Gagal membaca ${filename}:`, error.message);
+        return {};
+    }
+}
+
+function getProxyForWallet(walletIndex, proxyMappings) {
+    const key = `pk${walletIndex}`;
+    const proxy = proxyMappings[key];
+    
+    if (!proxy) {
+        console.log(`  🌍 Local IP`);
+        return null;
+    }
+    
+    console.log(`  🔗 Proxy: ${proxy}`);
+    return proxy;
+}
 
 // ============================================
 // UTILITY FUNCTIONS
@@ -618,7 +658,6 @@ async function depositSuiCollateral(keypair, address, attemptNum, obligationId) 
         const suiBalance = await getSuiBalance(address);
         const suiBalanceRaw = suiBalance * CONFIG.DECIMALS;
         
-        // Jumlah acak antara 0.1 hingga 0.5 SUI
         const randomSuiAmount = getRandomAmount(0.1, 0.5);
         const maxDepositSui = randomSuiAmount;
         const safeDepositAmount = Math.min(
@@ -861,11 +900,17 @@ async function withdrawGrCollateral(keypair, address, obligationId, obligationKe
 // ============================================
 // PROCESS WALLET
 // ============================================
-async function processWallet(keypair, address, walletIndex, totalWallets) {
+async function processWallet(keypair, address, walletIndex, totalWallets, proxyUrl) {
     console.log(`\n╔════════════════════════════════════════════════╗`);
     console.log(`║  WALLET ${walletIndex}/${totalWallets}`);
     console.log(`╚════════════════════════════════════════════════╝`);
-    console.log(`Address: ${address}\n`);
+    console.log(`Address: ${address}`);
+    if (proxyUrl) {
+        console.log(`Proxy: ${proxyUrl}`);
+    } else {
+        console.log(`Proxy: 🌍 Local IP`);
+    }
+    console.log();
     
     const balanceBefore = await getWalletBalances(address);
     console.log(`\n✅ Initial Balance Snapshot:`);
@@ -989,10 +1034,23 @@ async function runDailyBot() {
     const startTime = new Date();
     let dayCount = 1;
     
+    // LOAD PROXY MAPPINGS SATU KALI
+    const proxyMappings = readProxyMappings(CONFIG.PROXY_FILE);
+    
     console.log(`\n${'═'.repeat(70)}`);
     console.log(`  🤖 BOT AKAN BERJALAN 1 KALI SETIAP HARI (24 JAM LOOP)`);
     console.log(`  🟢 Start Time: ${startTime.toLocaleString()}`);
-    console.log(`${'═'.repeat(70)}\n`);
+    console.log(`${'═'.repeat(70)}`);
+    console.log(`  📋 PROXY CONFIGURATION LOADED`);
+    console.log(`${'═'.repeat(70)}`);
+    Object.entries(proxyMappings).forEach(([key, proxy]) => {
+        if (proxy) {
+            console.log(`  ${key}: ${proxy}`);
+        } else {
+            console.log(`  ${key}: LOCAL IP (empty line)`);
+        }
+    });
+    console.log();
     
     while (true) {
         const runStartTime = new Date();
@@ -1022,7 +1080,11 @@ async function runDailyBot() {
                 totalStats.failed++; 
                 continue; 
             }
-            const result = await processWallet(wallet.keypair, wallet.address, idx + 1, privateKeys.length);
+            
+            // GET PROXY UNTUK WALLET INI
+            const proxyUrl = getProxyForWallet(idx + 1, proxyMappings);
+            
+            const result = await processWallet(wallet.keypair, wallet.address, idx + 1, privateKeys.length, proxyUrl);
             if (result.success) { totalStats.success++; } else { totalStats.failed++; }
             Object.keys(result.stats).forEach(key => { totalStats[key] += result.stats[key]; });
             if (idx < privateKeys.length - 1) { await delay(getRandomDelay(30, 60), 'Next wallet:'); }
@@ -1043,18 +1105,18 @@ async function runDailyBot() {
         console.log(`${'─'.repeat(70)}`);
         console.log('  📊 STATISTIK:');
         console.log(`    🎯 Total: ${privateKeys.length} | ✓ ${totalStats.success} | ✗ ${totalStats.failed}`);
-        console.log(`    💰 XAUM: ${totalStats.xaumClaims}/3 | 💵 USDC: ${totalStats.usdcClaims}/3`);
-        console.log(`    🔄 Swaps: ${totalStats.swapUsdcToGusd}/3 + ${totalStats.swapGusdToUsdc}/1`);
-        console.log(`    🔒 Stakes: ${totalStats.stakes}/3 | 🔓 Redeems: ${totalStats.redeems}/3`);
-        console.log(`    📥 Deposits: GR=${totalStats.depositGr}/3 SUI=${totalStats.depositSui}/3 USDC=${totalStats.depositUsdc}/3`);
-        console.log(`    💸 Borrow: ${totalStats.borrowGusd}/3 | 💰 Repay: ${totalStats.repayGusd}/3`);
-        console.log(`    📤 Withdraws: GR=${totalStats.withdrawGr}/3`);
+        console.log(`    💰 XAUM: ${totalStats.xaumClaims}/${privateKeys.length * CONFIG.XAUM_CLAIM_COUNT} | 💵 USDC: ${totalStats.usdcClaims}/${privateKeys.length * CONFIG.USDC_CLAIM_COUNT}`);
+        console.log(`    🔄 Swaps: ${totalStats.swapUsdcToGusd}/${privateKeys.length * CONFIG.SWAP_USDC_TO_GUSD_COUNT} + ${totalStats.swapGusdToUsdc}/${privateKeys.length * CONFIG.SWAP_GUSD_TO_USDC_COUNT}`);
+        console.log(`    🔒 Stakes: ${totalStats.stakes}/${privateKeys.length * CONFIG.STAKE_XAUM_COUNT} | 🔓 Redeems: ${totalStats.redeems}/${privateKeys.length * CONFIG.REDEEM_XAUM_COUNT}`);
+        console.log(`    📥 Deposits: GR=${totalStats.depositGr}/${privateKeys.length * CONFIG.DEPOSIT_GR_COUNT} SUI=${totalStats.depositSui}/${privateKeys.length * CONFIG.DEPOSIT_SUI_COUNT} USDC=${totalStats.depositUsdc}/${privateKeys.length * CONFIG.DEPOSIT_USDC_COUNT}`);
+        console.log(`    💸 Borrow: ${totalStats.borrowGusd}/${privateKeys.length * CONFIG.BORROW_GUSD_COUNT} | 💰 Repay: ${totalStats.repayGusd}/${privateKeys.length * CONFIG.REPAY_GUSD_COUNT}`);
+        console.log(`    📤 Withdraws: GR=${totalStats.withdrawGr}/${privateKeys.length * CONFIG.WITHDRAW_COUNT}`);
         console.log(`${'═'.repeat(70)}\n`);
         
         // ========================================
         // HITUNG DELAY 24 JAM SAMPAI BESOK
         // ========================================
-        const duration24Hours = 24 * 60 * 60 * 1000; // 24 jam
+        const duration24Hours = 24 * 60 * 60 * 1000;
         const nextRunTime = new Date(runStartTime.getTime() + duration24Hours);
         const waitTime = nextRunTime.getTime() - Date.now();
         const waitHours = Math.floor(waitTime / 1000 / 60 / 60);

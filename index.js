@@ -1,8 +1,8 @@
-const { Ed25519Keypair } = require('@mysten/sui.js/keypairs/ed25519');
-const { TransactionBlock } = require('@mysten/sui.js/transactions');
-const { SuiClient } = require('@mysten/sui.js/client');
-const { decodeSuiPrivateKey } = require('@mysten/sui.js/cryptography');
-const fs = require('fs');
+import { Ed25519Keypair } from '@mysten/sui.js/keypairs/ed25519';
+import { TransactionBlock } from '@mysten/sui.js/transactions';
+import { SuiClient } from '@mysten/sui.js/client';
+import { decodeSuiPrivateKey } from '@mysten/sui.js/cryptography';
+import fs from 'fs';
 
 // ============================================
 // CONFIG
